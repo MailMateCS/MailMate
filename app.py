@@ -1449,7 +1449,7 @@ def cache_status():
     })
 
 
-@app.route('/api/security/cloud-recovery', methods=['GET', 'POST', 'DELETE'])
+@app.route('/api/security/cloud-recovery', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def cloud_recovery_settings():
     profile = get_user_profile()
     if not profile:
@@ -1458,6 +1458,14 @@ def cloud_recovery_settings():
     try:
         if request.method == 'POST':
             return jsonify({'ok': True, **cloud_key_recovery.enroll(identity)})
+        if request.method == 'PUT':
+            credentials = read_encrypted_json(DATA_DIR / 'google_credentials.json', 'google_credentials', default=None)
+            recovered = cloud_key_recovery.recover_key(identity)
+            from services.secure_storage import install_recovered_data_key
+            install_recovered_data_key(recovered)
+            if credentials:
+                write_encrypted_json(DATA_DIR / 'google_credentials.json', credentials, 'google_credentials')
+            return jsonify({'ok': True, **cloud_key_recovery.status(identity)})
         if request.method == 'DELETE':
             return jsonify({'ok': True, **cloud_key_recovery.disable(identity)})
         return jsonify(cloud_key_recovery.status(identity))

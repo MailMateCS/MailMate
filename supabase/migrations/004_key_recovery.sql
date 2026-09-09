@@ -3,6 +3,7 @@ create table if not exists public.key_recovery (
   provider text not null check (provider = 'google-cloud-kms'),
   kms_key_name text not null,
   wrapped_data_key text not null,
+  key_fingerprint text not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

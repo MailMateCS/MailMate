@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 import uuid
 
@@ -34,10 +35,12 @@ class CloudKeyRecovery:
         config = self._config()
         available = bool(config['kms_key'] and config['url'] and config['secret'] and config['namespace'])
         enrolled = False
+        rows = []
         if available:
-            rows = self._request('GET', params={'user_id': f'eq.{self._user_uuid(identity)}', 'select': 'user_id', 'limit': '1'}).json() or []
+            rows = self._request('GET', params={'user_id': f'eq.{self._user_uuid(identity)}', 'select': 'user_id,key_fingerprint', 'limit': '1'}).json() or []
             enrolled = bool(rows)
-        return {'available': available, 'enrolled': enrolled, 'recommended': available and not enrolled, 'provider': 'google-cloud-kms'}
+        recovery_needed = bool(enrolled and rows[0].get('key_fingerprint') != hashlib.sha256(data_key_for_wrapping()).hexdigest())
+        return {'available': available, 'enrolled': enrolled, 'recoveryNeeded': recovery_needed, 'recommended': available and (not enrolled or recovery_needed), 'provider': 'google-cloud-kms'}
 
     def enroll(self, identity):
         config = self._config()
@@ -53,8 +56,25 @@ class CloudKeyRecovery:
         self._request('POST', params={'on_conflict': 'user_id'}, payload=[{
             'user_id': self._user_uuid(identity), 'provider': 'google-cloud-kms',
             'kms_key_name': config['kms_key'], 'wrapped_data_key': wrapped,
+            'key_fingerprint': hashlib.sha256(data_key_for_wrapping()).hexdigest(),
         }], prefer='resolution=merge-duplicates,return=minimal')
         return self.status(identity)
+
+    def recover_key(self, identity):
+        rows = self._request('GET', params={
+            'user_id': f'eq.{self._user_uuid(identity)}',
+            'select': 'kms_key_name,wrapped_data_key', 'limit': '1',
+        }).json() or []
+        if not rows:
+            raise RuntimeError('No Google recovery key is enrolled for this account')
+        row = rows[0]
+        credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
+        response = AuthorizedSession(credentials).post(
+            f"https://cloudkms.googleapis.com/v1/{row['kms_key_name']}:decrypt",
+            json={'ciphertext': row['wrapped_data_key']}, timeout=15,
+        )
+        response.raise_for_status()
+        return base64.b64decode(response.json()['plaintext'])
 
     def disable(self, identity):
         self._request('DELETE', params={'user_id': f'eq.{self._user_uuid(identity)}'})

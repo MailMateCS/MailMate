@@ -99,6 +99,20 @@ def data_key_for_wrapping():
     return _master_key()
 
 
+def install_recovered_data_key(key):
+    if len(key) != 32:
+        raise DataEncryptionError('Recovered MailMate data key is invalid')
+    if os.getenv('MAILMATE_DATA_ENCRYPTION_KEY'):
+        raise DataEncryptionError('Replace MAILMATE_DATA_ENCRYPTION_KEY to restore this deployment')
+    if sys.platform != 'win32':
+        raise DataEncryptionError('Automatic key restore is currently available on Windows only')
+    key_path = Path(os.getenv('MAILMATE_KEY_FILE') or Path(__file__).resolve().parent.parent / 'data' / '.mailmate-key')
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = key_path.with_suffix('.tmp')
+    temporary.write_bytes(_windows_protect(key))
+    temporary.replace(key_path)
+
+
 def opaque_key(purpose, identity):
     message = f'{purpose}\0{identity}'.encode('utf-8')
     return hmac.new(_master_key(), message, hashlib.sha256).hexdigest()

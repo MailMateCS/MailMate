@@ -443,7 +443,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!response.ok) throw new Error(cloudRecoveryState.error || 'Recovery status unavailable');
       if (button) {
         button.disabled = !cloudRecoveryState.available;
-        button.textContent = cloudRecoveryState.enrolled ? 'Enabled' : (cloudRecoveryState.available ? 'Enable' : 'Administrator setup required');
+        button.textContent = cloudRecoveryState.recoveryNeeded ? 'Restore key' : (cloudRecoveryState.enrolled ? 'Enabled' : (cloudRecoveryState.available ? 'Enable' : 'Administrator setup required'));
       }
       const dismissed = localStorage.getItem(`mailmate.recovery.dismissed.${state.userId}`) === '1';
       if (cloudRecoveryState.recommended && !dismissed) openCloudRecovery();
@@ -491,6 +491,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function toggleCloudRecovery() {
     if (!cloudRecoveryState?.available) return;
+    if (cloudRecoveryState.recoveryNeeded) {
+      const response = await fetch(`${API_BASE}/api/security/cloud-recovery`, { method: 'PUT' });
+      const result = await response.json();
+      if (!response.ok) return addError(`Recovery: ${result.error || 'Could not restore key'}`);
+      return loadCloudRecovery();
+    }
     if (!cloudRecoveryState.enrolled) return openCloudRecovery();
     if (!window.confirm('Disable Google account recovery for this MailMate key?')) return;
     await fetch(`${API_BASE}/api/security/cloud-recovery`, { method: 'DELETE' });
