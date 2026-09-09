@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from services.secure_storage import DataEncryptionError, read_encrypted_json, write_encrypted_json
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 AUTOMATIONS_FILE = BASE_DIR / 'data' / 'automations.json'
@@ -95,19 +97,13 @@ class AutomationService:
         self._stop.set()
 
     def _read(self):
-        if not self.store_path.exists():
-            return []
-        try:
-            data = json.loads(self.store_path.read_text(encoding='utf-8'))
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
+        data = read_encrypted_json(self.store_path, 'automations', default=[])
+        if not isinstance(data, list):
+            raise DataEncryptionError('Encrypted automation storage has an invalid shape')
+        return data
 
     def _write(self, automations):
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.store_path.with_suffix('.tmp')
-        temporary.write_text(json.dumps(automations, indent=2, ensure_ascii=False), encoding='utf-8')
-        temporary.replace(self.store_path)
+        write_encrypted_json(self.store_path, automations, 'automations')
 
     def _validate_schedule(self, raw):
         schedule = deepcopy(raw or {})

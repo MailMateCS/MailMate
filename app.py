@@ -47,6 +47,7 @@ from services.mail_context_service import mail_context_service
 from services.kyle_agent_planner import plan_kyle_turn
 from services.mail_sync_service import MailSyncService
 from services.elevenlabs_service import ElevenLabsError, signed_agent_url, status as elevenlabs_status, synthesize as elevenlabs_synthesize
+from services.secure_storage import DataEncryptionError, read_encrypted_json, write_encrypted_json
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-dev-secret-key-123')
@@ -138,11 +139,11 @@ def _calendar_account_key(profile=None):
 
 
 def _read_calendar_dismissals():
-    if not CALENDAR_DISMISSALS_FILE.exists():
-        return {}
     try:
-        data = json.loads(CALENDAR_DISMISSALS_FILE.read_text(encoding='utf-8'))
+        data = read_encrypted_json(CALENDAR_DISMISSALS_FILE, 'calendar_dismissals', default={})
         return data if isinstance(data, dict) else {}
+    except DataEncryptionError:
+        raise
     except Exception:
         return {}
 
@@ -165,9 +166,7 @@ def _remember_calendar_dismissal(profile, marker):
         values = {str(value) for value in (data.get(account) or []) if value}
         values.add(marker)
         data[account] = sorted(values)
-        tmp = CALENDAR_DISMISSALS_FILE.with_suffix('.tmp')
-        tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
-        tmp.replace(CALENDAR_DISMISSALS_FILE)
+        write_encrypted_json(CALENDAR_DISMISSALS_FILE, data, 'calendar_dismissals')
     return True
 
 
@@ -783,10 +782,9 @@ def user_avatar():
 @app.route('/api/auth/logout', methods=['POST'])
 def auth_logout():
     session.clear()
-    credential_file = DATA_DIR / 'google_credentials.json'
     try:
-        if credential_file.exists():
-            credential_file.unlink()
+        from services.secure_storage import delete_encrypted_json
+        delete_encrypted_json(DATA_DIR / 'google_credentials.json')
     except Exception as exc:
         app.logger.warning('Could not delete local Google credentials: %s', exc)
     return jsonify({"ok": True, "redirect": "/"})
@@ -1434,13 +1432,14 @@ def cache_status():
     if not profile:
         return jsonify({"authenticated": False, "supabase": {"enabled": False, "configured": False, "ready": False}}), 401
 
+    supabase_status = mail_context_service.status()
     return jsonify({
         "authenticated": True,
-        "supabase": {"enabled": False, "configured": False, "ready": False, "mode": "disabled"},
+        "supabase": supabase_status,
         "cache": {
-            "available": False,
-            "mode": "live-gmail",
-            "retention": "transient-browser-ram-only",
+            "available": bool(supabase_status.get('ready')),
+            "mode": "encrypted-derived-context" if supabase_status.get('ready') else "live-gmail",
+            "retention": "encrypted-derived-context-only",
         },
         "policy": {
             "sync_check_seconds": CACHE_SYNC_SECONDS,

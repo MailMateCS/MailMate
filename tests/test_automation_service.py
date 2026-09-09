@@ -63,9 +63,9 @@ def test_due_once_schedule_restores_after_restart_and_runs(tmp_path):
         'schedule': {'type': 'once', 'at': '2099-09-08T08:00:00+05:30'},
         'action': {'goal': 'Prepare the brief.'},
     })
-    records = json.loads(path.read_text(encoding='utf-8'))
+    records = first._read()
     records[0]['next_run'] = '2026-09-07T00:00:00+00:00'
-    path.write_text(json.dumps(records), encoding='utf-8')
+    first._write(records)
 
     calls = []
     restored = AutomationService(path)

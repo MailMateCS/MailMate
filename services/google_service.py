@@ -19,11 +19,17 @@ from googleapiclient.errors import HttpError
 
 from dotenv import load_dotenv
 
+from services.secure_storage import read_encrypted_json, write_encrypted_json
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / 'api.env')
 
 CREDENTIALS_FILE = BASE_DIR / 'data' / 'google_credentials.json'
 TOKEN_URI = 'https://oauth2.googleapis.com/token'
+
+
+def _credential_data(default=None):
+    return read_encrypted_json(CREDENTIALS_FILE, 'google_credentials', default=default)
 
 class GmailInsufficientPermissionError(RuntimeError):
     """Raised when Gmail API returns 403 due to missing gmail.modify or write scopes."""
@@ -60,9 +66,9 @@ def _parse_expiry(value):
 def get_google_config():
     client_id = os.getenv('GOOGLE_CLIENT_ID')
     client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-    if (not client_id or not client_secret) and CREDENTIALS_FILE.exists():
+    if not client_id or not client_secret:
         try:
-            d = json.loads(CREDENTIALS_FILE.read_text(encoding='utf-8'))
+            d = _credential_data({}) or {}
             client_id = client_id or d.get('client_id')
             client_secret = client_secret or d.get('client_secret')
         except Exception:
@@ -99,10 +105,10 @@ def get_gmail_permissions():
 
 
 def get_credentials():
-    if not CREDENTIALS_FILE.exists():
-        return None
     try:
-        data = json.loads(CREDENTIALS_FILE.read_text(encoding='utf-8'))
+        data = _credential_data(None)
+        if not data:
+            return None
         creds = Credentials(
             token=data.get('token'),
             refresh_token=data.get('refresh_token'),
@@ -123,22 +129,14 @@ def get_credentials():
 
 
 def save_credentials(creds):
-    CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    previous = {}
-    if CREDENTIALS_FILE.exists():
-        try:
-            previous = json.loads(CREDENTIALS_FILE.read_text(encoding='utf-8'))
-        except Exception:
-            previous = {}
+    previous = _credential_data({}) or {}
     data = json.loads(creds.to_json())
     if not data.get('refresh_token') and previous.get('refresh_token'):
         data['refresh_token'] = previous['refresh_token']
     data.setdefault('client_id', os.getenv('GOOGLE_CLIENT_ID', ''))
     data.setdefault('client_secret', os.getenv('GOOGLE_CLIENT_SECRET', ''))
     data.setdefault('token_uri', TOKEN_URI)
-    tmp = CREDENTIALS_FILE.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
-    tmp.replace(CREDENTIALS_FILE)
+    write_encrypted_json(CREDENTIALS_FILE, data, 'google_credentials')
 
 
 def get_auth_url():

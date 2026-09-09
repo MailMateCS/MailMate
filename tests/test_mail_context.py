@@ -134,6 +134,7 @@ def _configure_supabase(monkeypatch):
     monkeypatch.setenv('SUPABASE_URL', 'https://example.supabase.co')
     monkeypatch.setenv('SUPABASE_SECRET_KEY', 'server-secret')
     monkeypatch.setenv('MAILMATE_USER_NAMESPACE_UUID', '12345678-1234-4234-8234-123456789abc')
+    monkeypatch.setenv('MAILMATE_DATA_ENCRYPTION_KEY', 'MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=')
 
 
 def test_irrelevant_email_is_not_persisted(monkeypatch):
@@ -158,9 +159,17 @@ def test_supabase_payload_is_minimized(monkeypatch):
         attachments=[{'filename': 'secret.pdf', 'data': 'private'}],
         raw_headers={'Authorization': 'secret'},
     )])
-    context_call = next(call for call in calls if call[0] == 'POST' and call[1] == 'active_ui_context')
+    context_call = next(call for call in calls if call[0] == 'POST' and call[1] == 'encrypted_state')
     payload = context_call[2]['payload'][0]
     assert result['persistence']['stored'] == 1
-    assert not ({'body', 'body_html', 'snippet', 'attachments', 'raw_headers'} & set(payload))
-    assert payload['source_message_id'] == 'm-1'
-    assert payload['needs_attention'] is True
+    assert 'private' not in str(payload)
+    assert 'teacher@example.edu' not in str(payload)
+    assert 'Please submit the project report tomorrow' not in str(payload)
+    from services.secure_storage import decrypt_json
+    restored = decrypt_json(
+        payload['payload_ciphertext'], payload['payload_nonce'], 'mail_context',
+        payload['record_key'], payload['encryption_version'],
+    )
+    assert not ({'body', 'body_html', 'snippet', 'attachments', 'raw_headers'} & set(restored))
+    assert restored['gmail_message_id'] == 'm-1'
+    assert restored['attention_allowed'] is True

@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from services.calendar_conflicts import calculate_conflicts
+from services.secure_storage import read_encrypted_json, write_encrypted_json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_FILE = BASE_DIR / 'data' / 'google_credentials.json'
@@ -24,10 +25,10 @@ WRITE_SCOPES = {
 
 
 def access_status():
-    if not CREDENTIALS_FILE.exists():
-        return {'authenticated': False, 'writable': False, 'timezone': APP_TIMEZONE}
     try:
-        info = json.loads(CREDENTIALS_FILE.read_text(encoding='utf-8'))
+        info = read_encrypted_json(CREDENTIALS_FILE, 'google_credentials', default=None)
+        if not info:
+            return {'authenticated': False, 'writable': False, 'timezone': APP_TIMEZONE}
     except Exception:
         return {'authenticated': False, 'writable': False, 'timezone': APP_TIMEZONE}
     scopes = set(info.get('scopes') or [])
@@ -60,10 +61,10 @@ def _tz():
 
 
 def _load_credentials():
-    if not CREDENTIALS_FILE.exists():
-        raise CalendarAuthError('Google credentials are not available')
     try:
-        info = json.loads(CREDENTIALS_FILE.read_text(encoding='utf-8'))
+        info = read_encrypted_json(CREDENTIALS_FILE, 'google_credentials', default=None)
+        if not info:
+            raise CalendarAuthError('Google credentials are not available')
     except Exception as exc:
         raise CalendarAuthError(f'Could not read Google credentials: {exc}') from exc
     if not info.get('token'):
@@ -103,10 +104,7 @@ def _save_credentials(credentials, previous=None):
     data.setdefault('client_id', os.getenv('GOOGLE_CLIENT_ID', ''))
     data.setdefault('client_secret', os.getenv('GOOGLE_CLIENT_SECRET', ''))
     data.setdefault('token_uri', TOKEN_URI)
-    CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CREDENTIALS_FILE.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
-    tmp.replace(CREDENTIALS_FILE)
+    write_encrypted_json(CREDENTIALS_FILE, data, 'google_credentials')
 
 
 def _service():

@@ -12,6 +12,8 @@ from dateutil import parser as date_parser
 
 import requests
 
+from services.secure_storage import decrypt_json, encrypt_json, encryption_ready, opaque_key
+
 
 CLASSIFIER_VERSION = 4
 RULES_VERSION = 2
@@ -349,6 +351,7 @@ class MailContextService:
         secret = self._config()['secret']
         return {
             'apikey': secret,
+            'Authorization': f'Bearer {secret}',
             'Content-Type': 'application/json',
         }
 
@@ -377,13 +380,10 @@ class MailContextService:
         )
 
     @staticmethod
-    def _storage_payload(row, user_uuid, account_uuid):
-        now = datetime.now(timezone.utc)
+    def _storage_payload(row):
         return {
-            'user_id': user_uuid,
-            'account_id': account_uuid,
-            'source_message_id': row['gmail_message_id'],
-            'source_thread_id': row.get('gmail_thread_id') or None,
+            'gmail_message_id': row['gmail_message_id'],
+            'gmail_thread_id': row.get('gmail_thread_id') or None,
             'source_fingerprint': row['source_fingerprint'],
             'context_type': row.get('context_type') or 'attention',
             'status': row.get('status') or 'active',
@@ -392,16 +392,22 @@ class MailContextService:
             'summary': row.get('summary') or None,
             'importance_score': row.get('importance_score') or 0,
             'urgency_score': row.get('urgency_score') or 0,
-            'needs_attention': bool(row.get('attention_allowed')),
+            'attention_allowed': bool(row.get('attention_allowed')),
             'requires_reply': bool(row.get('requires_reply')),
-            'work_required': bool(row.get('work_allowed')),
-            'calendar_required': bool(row.get('calendar_allowed')),
+            'work_allowed': bool(row.get('work_allowed')),
+            'calendar_allowed': bool(row.get('calendar_allowed')),
             'deadline_at': row.get('deadline_at'),
             'work_job_id': row.get('work_job_id'),
-            'updated_at': now.isoformat(),
-            'expires_at': (now + timedelta(days=30)).isoformat(),
             'classifier_version': row.get('classifier_version') or CLASSIFIER_VERSION,
         }
+
+    @staticmethod
+    def _record_key(user_uuid, message_id):
+        return opaque_key('mail_context', f'{user_uuid}:{message_id}')
+
+    @staticmethod
+    def _sync_key(user_uuid):
+        return opaque_key('sync_state', user_uuid)
 
     def update(self, user_id, messages):
         user_key = str(user_id or 'default').lower()
@@ -460,76 +466,69 @@ class MailContextService:
         config = self._config()
         if not all(config.values()):
             return {'enabled': True, 'stored': 0, 'mode': 'missing-server-config'}
+        if not encryption_ready():
+            return {'enabled': True, 'stored': 0, 'mode': 'encryption-key-required', 'degraded': True}
         try:
-            user_uuid, account_uuid = self._identity(external_user_id)
-            account = [{
-                'id': account_uuid,
-                'user_id': user_uuid,
-                'provider': 'gmail',
-                'provider_account_id_hash': hashlib.sha256(external_user_id.encode('utf-8')).hexdigest(),
-                'rules_version': RULES_VERSION,
-                'last_sync_at': datetime.now(timezone.utc).isoformat(),
-            }]
-            self._request('POST', 'mail_accounts', params={'on_conflict': 'id'}, payload=account, prefer='resolution=merge-duplicates,return=minimal')
+            user_uuid, _ = self._identity(external_user_id)
             relevant = [row for row in rows if self._is_relevant(row)]
             irrelevant_ids = {row['gmail_message_id'] for row in rows if not self._is_relevant(row)}
             delete_ids = sorted(set(removed_ids) | irrelevant_ids)
             if delete_ids:
-                self._request('DELETE', 'active_ui_context', params={
-                    'account_id': f'eq.{account_uuid}',
-                    'source_message_id': f'in.({",".join(delete_ids)})',
+                keys = [self._record_key(user_uuid, item) for item in delete_ids]
+                self._request('DELETE', 'encrypted_state', params={
+                    'user_id': f'eq.{user_uuid}',
+                    'record_key': f'in.({",".join(keys)})',
                 })
-            minimized = [self._storage_payload(row, user_uuid, account_uuid) for row in relevant]
-            if minimized:
-                self._request('POST', 'active_ui_context', params={'on_conflict': 'account_id,source_message_id'}, payload=minimized, prefer='resolution=merge-duplicates,return=minimal')
+            now = datetime.now(timezone.utc)
+            encrypted = []
+            for row in relevant:
+                record_key = self._record_key(user_uuid, row['gmail_message_id'])
+                encrypted.append({
+                    'record_key': record_key,
+                    'user_id': user_uuid,
+                    'record_type': 'mail_context',
+                    **encrypt_json(self._storage_payload(row), 'mail_context', record_key),
+                    'updated_at': now.isoformat(),
+                    'expires_at': (now + timedelta(days=30)).isoformat(),
+                })
+            if encrypted:
+                self._request('POST', 'encrypted_state', params={'on_conflict': 'record_key'}, payload=encrypted, prefer='resolution=merge-duplicates,return=minimal')
             self._active_rows = len(relevant)
-            return {'enabled': True, 'stored': len(minimized), 'deleted': len(delete_ids), 'mode': 'active-context'}
+            return {'enabled': True, 'stored': len(encrypted), 'deleted': len(delete_ids), 'mode': 'encrypted-context'}
         except Exception:
             self._reachable = False
-            self._last_error = 'Supabase active-context persistence is unavailable'
-            return {'enabled': True, 'stored': 0, 'mode': 'ram-fallback', 'degraded': True}
+            self._last_error = 'Encrypted Supabase context persistence is unavailable'
+            return {'enabled': True, 'stored': 0, 'mode': 'memory-only-degraded', 'degraded': True}
 
     def hydrate(self, external_user_id):
         """Hydrate only live minimized context. Supabase failure leaves RAM usable."""
-        if not self._enabled() or not all(self._config().values()):
+        if not self._enabled() or not all(self._config().values()) or not encryption_ready():
             return []
         try:
-            _, account_uuid = self._identity(external_user_id)
+            user_uuid, _ = self._identity(external_user_id)
             now = datetime.now(timezone.utc).isoformat()
-            self._request('DELETE', 'active_ui_context', params={
-                'account_id': f'eq.{account_uuid}',
+            self._request('DELETE', 'encrypted_state', params={
+                'user_id': f'eq.{user_uuid}',
+                'record_type': 'eq.mail_context',
                 'expires_at': f'lte.{now}',
             })
-            response = self._request('GET', 'active_ui_context', params={
-                'account_id': f'eq.{account_uuid}',
-                'status': 'eq.active',
+            response = self._request('GET', 'encrypted_state', params={
+                'user_id': f'eq.{user_uuid}',
+                'record_type': 'eq.mail_context',
                 'expires_at': f'gt.{now}',
-                'select': '*',
+                'select': 'record_key,payload_ciphertext,payload_nonce,encryption_version',
             })
             stored = response.json() or []
             rows = {}
             for item in stored:
-                message_id = str(item.get('source_message_id') or '')
+                payload = decrypt_json(
+                    item['payload_ciphertext'], item['payload_nonce'], 'mail_context',
+                    item['record_key'], item.get('encryption_version'),
+                )
+                message_id = str(payload.get('gmail_message_id') or '')
                 if not message_id:
                     continue
-                rows[message_id] = {
-                    'gmail_message_id': message_id,
-                    'gmail_thread_id': item.get('source_thread_id'),
-                    'source_fingerprint': item.get('source_fingerprint'),
-                    'context_type': item.get('context_type'),
-                    'status': item.get('status'),
-                    'display_title': item.get('display_title'),
-                    'sender_display': item.get('sender_display'),
-                    'summary': item.get('summary'),
-                    'importance_score': item.get('importance_score') or 0,
-                    'urgency_score': item.get('urgency_score') or 0,
-                    'attention_allowed': bool(item.get('needs_attention')),
-                    'requires_reply': bool(item.get('requires_reply')),
-                    'work_allowed': bool(item.get('work_required')),
-                    'calendar_allowed': bool(item.get('calendar_required')),
-                    'deadline_at': item.get('deadline_at'),
-                    'classifier_version': item.get('classifier_version') or CLASSIFIER_VERSION,
-                }
+                rows[message_id] = payload
             with self._lock:
                 self._rows[str(external_user_id or 'default').lower()] = rows
             self._active_rows = len(rows)
@@ -555,40 +554,52 @@ class MailContextService:
             return deepcopy(list(self._rows.get(user_key, {}).values()))
 
     def load_sync_state(self, external_user_id):
-        if not self._enabled() or not all(self._config().values()):
+        if not self._enabled() or not all(self._config().values()) or not encryption_ready():
             return {}
         try:
-            _, account_uuid = self._identity(external_user_id)
-            response = self._request('GET', 'mail_accounts', params={
-                'id': f'eq.{account_uuid}',
-                'select': 'last_history_id,last_sync_at,last_full_scan_at',
+            user_uuid, _ = self._identity(external_user_id)
+            record_key = self._sync_key(user_uuid)
+            response = self._request('GET', 'encrypted_state', params={
+                'record_key': f'eq.{record_key}',
+                'select': 'record_key,payload_ciphertext,payload_nonce,encryption_version',
                 'limit': '1',
             })
             rows = response.json() or []
-            return rows[0] if rows else {}
+            if not rows:
+                return {}
+            row = rows[0]
+            return decrypt_json(row['payload_ciphertext'], row['payload_nonce'], 'sync_state', record_key, row.get('encryption_version'))
         except Exception:
             self._reachable = False
             return {}
 
     def save_sync_state(self, external_user_id, history_id, full_scan=False):
-        if not self._enabled() or not all(self._config().values()):
+        if not self._enabled() or not all(self._config().values()) or not encryption_ready():
             return False
         try:
-            user_uuid, account_uuid = self._identity(external_user_id)
+            user_uuid, _ = self._identity(external_user_id)
             now = datetime.now(timezone.utc).isoformat()
-            account = {
-                'id': account_uuid,
-                'user_id': user_uuid,
-                'provider': 'gmail',
-                'provider_account_id_hash': hashlib.sha256(str(external_user_id).encode('utf-8')).hexdigest(),
+            previous = self.load_sync_state(external_user_id)
+            state = {
                 'last_history_id': str(history_id or '') or None,
                 'last_sync_at': now,
                 'rules_version': RULES_VERSION,
             }
             if full_scan:
-                account['last_full_scan_at'] = now
+                state['last_full_scan_at'] = now
+            elif previous.get('last_full_scan_at'):
+                state['last_full_scan_at'] = previous['last_full_scan_at']
+            record_key = self._sync_key(user_uuid)
+            record = {
+                'record_key': record_key,
+                'user_id': user_uuid,
+                'record_type': 'sync_state',
+                **encrypt_json(state, 'sync_state', record_key),
+                'updated_at': now,
+                'expires_at': None,
+            }
             self._request(
-                'POST', 'mail_accounts', params={'on_conflict': 'id'}, payload=[account],
+                'POST', 'encrypted_state', params={'on_conflict': 'record_key'}, payload=[record],
                 prefer='resolution=merge-duplicates,return=minimal',
             )
             return True
@@ -599,12 +610,14 @@ class MailContextService:
     def status(self):
         enabled = self._enabled()
         configured = all(self._config().values())
+        encrypted = encryption_ready() if enabled else True
         return {
             'enabled': enabled,
-            'configured': configured,
+            'configured': configured and encrypted,
             'reachable': self._reachable if configured else None,
-            'ready': enabled and configured and self._reachable is not False,
-            'mode': 'active-context' if enabled and configured else 'memory-only',
+            'ready': enabled and configured and encrypted and self._reachable is not False,
+            'mode': 'encrypted-context' if enabled and configured and encrypted else 'memory-only',
+            'encryptedAtRest': enabled and configured and encrypted,
             'activeRows': self._active_rows,
             'degraded': self._reachable is False,
         }

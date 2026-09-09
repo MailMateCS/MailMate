@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from services.secure_storage import decrypt_json, encrypt_json, encryption_ready, opaque_key
+
 
 TERMINAL_STATUSES = {
     'sent', 'approved_sent', 'resolved_external', 'ignored_outbound',
@@ -40,6 +42,7 @@ class WorkStateStore:
         url, secret, _ = self._config()
         headers = {
             'apikey': secret,
+            'Authorization': f'Bearer {secret}',
             'Content-Type': 'application/json',
         }
         prefer = kwargs.pop('prefer', None)
@@ -69,7 +72,6 @@ class WorkStateStore:
         terminal = str(job.get('status') or '') in TERMINAL_STATUSES
         return {
             'job_id': str(job.get('id') or ''),
-            'user_id': self._user_uuid(job.get('user_id')),
             'source_message_id': str(source.get('message_id') or ''),
             'source_thread_id': str(source.get('thread_id') or '') or None,
             'clean_title': str(job.get('clean_title') or job.get('title') or 'Work task')[:240],
@@ -84,6 +86,14 @@ class WorkStateStore:
             'updated_at': str(job.get('updated_at') or now.isoformat()),
             'expires_at': (now + timedelta(days=2 if terminal else 14)).isoformat(),
         }
+
+    @staticmethod
+    def _record_key(user_uuid, job_id):
+        return opaque_key('work_state', f'{user_uuid}:{job_id}')
+
+    @staticmethod
+    def _context_key(user_uuid, message_id):
+        return opaque_key('mail_context', f'{user_uuid}:{message_id}')
 
     @staticmethod
     def _newer(left, right):
@@ -127,16 +137,22 @@ class WorkStateStore:
         now_monotonic = time.monotonic()
         if not normalized or (not force and now_monotonic - self._last_hydrated_at.get(normalized, 0) < refresh_seconds):
             return
-        if not self._enabled() or not all(self._config()):
+        if not self._enabled() or not all(self._config()) or not encryption_ready():
             return
         try:
-            response = self._request('GET', 'active_work_state', params={
-                'user_id': f'eq.{self._user_uuid(normalized)}',
+            user_uuid = self._user_uuid(normalized)
+            response = self._request('GET', 'encrypted_state', params={
+                'user_id': f'eq.{user_uuid}',
+                'record_type': 'eq.work_state',
                 'expires_at': f'gt.{datetime.now(timezone.utc).isoformat()}',
-                'select': '*',
+                'select': 'record_key,payload_ciphertext,payload_nonce,encryption_version,updated_at',
             })
             with self._lock:
-                for row in response.json() or []:
+                for encrypted in response.json() or []:
+                    row = decrypt_json(
+                        encrypted['payload_ciphertext'], encrypted['payload_nonce'],
+                        'work_state', encrypted['record_key'], encrypted.get('encryption_version'),
+                    )
                     job_id = str(row.get('job_id') or '')
                     local = self._jobs.get(job_id)
                     if not job_id or (local and not self._newer(row.get('updated_at'), local.get('updated_at'))):
@@ -153,35 +169,54 @@ class WorkStateStore:
     def write_all(self, jobs):
         with self._lock:
             self._jobs = deepcopy(jobs if isinstance(jobs, dict) else {})
-        if not self._enabled() or not all(self._config()):
+        if not self._enabled() or not all(self._config()) or not encryption_ready():
             return
         try:
             for job in self._jobs.values():
                 job_id = str(job.get('id') or '')
                 if not job_id:
                     continue
+                user_uuid = self._user_uuid(job.get('user_id'))
                 if job.get('status') in TERMINAL_STATUSES:
                     source_id = str((job.get('source') or {}).get('message_id') or '')
                     if source_id:
-                        self._request('DELETE', 'active_ui_context', params={
-                            'user_id': f'eq.{self._user_uuid(job.get("user_id"))}',
-                            'source_message_id': f'eq.{source_id}',
+                        self._request('DELETE', 'encrypted_state', params={
+                            'user_id': f'eq.{user_uuid}',
+                            'record_key': f'eq.{self._context_key(user_uuid, source_id)}',
                         })
                 payload = self._payload(job)
                 if not payload['source_message_id']:
                     continue
-                remote = self._request('GET', 'active_work_state', params={
-                    'job_id': f'eq.{job_id}', 'select': '*', 'limit': '1',
+                record_key = self._record_key(user_uuid, job_id)
+                remote_rows = self._request('GET', 'encrypted_state', params={
+                    'record_key': f'eq.{record_key}',
+                    'select': 'record_key,payload_ciphertext,payload_nonce,encryption_version,updated_at',
+                    'limit': '1',
                 }).json() or []
-                if remote and self._newer(remote[0].get('updated_at'), payload.get('updated_at')):
+                remote = None
+                if remote_rows:
+                    encrypted = remote_rows[0]
+                    remote = decrypt_json(
+                        encrypted['payload_ciphertext'], encrypted['payload_nonce'],
+                        'work_state', record_key, encrypted.get('encryption_version'),
+                    )
+                if remote and self._newer(remote.get('updated_at'), payload.get('updated_at')):
                     with self._lock:
                         self._jobs[job_id] = self._job_from_row(
-                            remote[0], job.get('user_id')
+                            remote, job.get('user_id')
                         )
                     continue
+                record = {
+                    'record_key': record_key,
+                    'user_id': user_uuid,
+                    'record_type': 'work_state',
+                    **encrypt_json(payload, 'work_state', record_key),
+                    'updated_at': payload['updated_at'],
+                    'expires_at': payload['expires_at'],
+                }
                 self._request(
-                    'POST', 'active_work_state',
-                    params={'on_conflict': 'job_id'}, json=[payload],
+                    'POST', 'encrypted_state',
+                    params={'on_conflict': 'record_key'}, json=[record],
                     prefer='resolution=merge-duplicates,return=minimal',
                 )
         except Exception:

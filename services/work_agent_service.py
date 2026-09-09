@@ -24,6 +24,7 @@ from services.privacy_gate import PrivacyGate
 from services.agent import AgentSession, AgentLoop, PolicyEngine, ToolRegistry, Verifier
 from services.agent.models.lmstudio import LMStudioModel, ModelTimeout, ModelUnavailable
 from services.work_state_store import work_state_store
+from services.secure_storage import DataEncryptionError, read_encrypted_json, write_encrypted_json
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -169,13 +170,13 @@ class WorkAgentService:
         self._running_worker = t
 
     def get_settings(self) -> dict:
-        if not SETTINGS_FILE.exists():
-            return dict(DEFAULT_SETTINGS)
         try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            data = read_encrypted_json(SETTINGS_FILE, 'work_settings', default={})
             merged = dict(DEFAULT_SETTINGS)
             merged.update(data if isinstance(data, dict) else {})
             return merged
+        except DataEncryptionError:
+            raise
         except Exception:
             return dict(DEFAULT_SETTINGS)
 
@@ -184,8 +185,7 @@ class WorkAgentService:
         for k, v in (new_settings or {}).items():
             if k in DEFAULT_SETTINGS:
                 current[k] = v
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_encrypted_json(SETTINGS_FILE, current, 'work_settings')
         return current
 
     def _read_jobs(self):
