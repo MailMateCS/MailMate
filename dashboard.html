@@ -358,6 +358,7 @@
           <article><div><h2>Mailbox retention</h2><p>Gmail remains the source of truth. Mailmate keeps message content transient and does not use a central mailbox database.</p></div><span id="cacheSettingsStatus">Checking</span></article>
           <article><div><h2>Kyle voice & audio</h2><p>Mute or unmute Kyle's voice responses and active audio listening.</p></div><label class="switch" title="Mute or unmute Kyle voice"><input type="checkbox" id="settingKyleVoice" checked><span></span></label></article>
           <article><div><h2>Cache policy</h2><p id="cachePolicyText">Checking cache policy...</p></div><span>Automatic</span></article>
+          <article><div><h2>Google account recovery</h2><p>Optionally wrap this device's encryption key with Google Cloud KMS so signing in can restore encrypted MailMate state on a replacement device.</p></div><button class="secondary-btn" id="cloudRecoveryBtn" type="button" disabled>Checking</button></article>
           <article class="settings-privacy-article">
             <div style="width:100%;">
               <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
@@ -442,6 +443,14 @@
         </section>
       </section>
     </main>
+  </div>
+
+  <div class="calendar-modal-backdrop" id="cloudRecoveryModal" hidden>
+    <section class="calendar-modal automation-modal-card" role="dialog" aria-modal="true" aria-labelledby="cloudRecoveryTitle">
+      <header><div><p class="section-label">Recommended</p><h2 id="cloudRecoveryTitle">Protect account recovery</h2></div></header>
+      <p>Google Cloud KMS can keep an encrypted recovery copy of this device key. This is optional, and MailMate will never ask for your password or authenticator code.</p>
+      <div class="calendar-modal-footer"><button class="secondary-btn" id="cloudRecoveryLater" type="button">Not now</button><div><button class="btn btn-primary" id="cloudRecoveryEnable" type="button">Enable recovery</button></div></div>
+    </section>
   </div>
 
   <div class="calendar-modal-backdrop" id="calendarModal" hidden>

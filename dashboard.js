@@ -100,6 +100,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const healthPromise = loadHealth();
     const automationsPromise = loadAutomations();
     await Promise.allSettled([inboxPromise, healthPromise, automationsPromise]);
+    await loadCloudRecovery();
     startCalendarAutoSync();
     startInboxAutoSync();
   }
@@ -218,6 +219,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     $('logoutBtn')?.addEventListener('click', logout);
     $('sidebarProfileBtn')?.addEventListener('click', () => showTab('settings'));
+    $('cloudRecoveryBtn')?.addEventListener('click', toggleCloudRecovery);
+    $('cloudRecoveryEnable')?.addEventListener('click', enableCloudRecovery);
+    $('cloudRecoveryLater')?.addEventListener('click', dismissCloudRecovery);
 
     const themeToggleBtn = $('themeToggleBtn');
     const darkModeToggle = $('settingDarkMode');
@@ -427,6 +431,70 @@ document.addEventListener('DOMContentLoaded', () => {
     if (policyText) {
       policyText.textContent = 'Raw mailbox content is kept in transient browser RAM only. Privacy gate filters all sensitive correspondence locally before AI summarization.';
     }
+  }
+
+  let cloudRecoveryState = null;
+
+  async function loadCloudRecovery() {
+    const button = $('cloudRecoveryBtn');
+    try {
+      const response = await fetch(`${API_BASE}/api/security/cloud-recovery`, { cache: 'no-store' });
+      cloudRecoveryState = await response.json();
+      if (!response.ok) throw new Error(cloudRecoveryState.error || 'Recovery status unavailable');
+      if (button) {
+        button.disabled = !cloudRecoveryState.available;
+        button.textContent = cloudRecoveryState.enrolled ? 'Enabled' : (cloudRecoveryState.available ? 'Enable' : 'Administrator setup required');
+      }
+      const dismissed = localStorage.getItem(`mailmate.recovery.dismissed.${state.userId}`) === '1';
+      if (cloudRecoveryState.recommended && !dismissed) openCloudRecovery();
+    } catch (_) {
+      if (button) { button.disabled = true; button.textContent = 'Administrator setup required'; }
+    }
+  }
+
+  function openCloudRecovery() {
+    const modal = $('cloudRecoveryModal');
+    if (!modal) return;
+    modal.hidden = false;
+    document.body.classList.add('modal-open');
+    requestAnimationFrame(() => modal.classList.add('is-visible'));
+  }
+
+  function closeCloudRecovery() {
+    const modal = $('cloudRecoveryModal');
+    modal?.classList.remove('is-visible');
+    document.body.classList.remove('modal-open');
+    setTimeout(() => { if (modal && !modal.classList.contains('is-visible')) modal.hidden = true; }, 140);
+  }
+
+  function dismissCloudRecovery() {
+    localStorage.setItem(`mailmate.recovery.dismissed.${state.userId}`, '1');
+    closeCloudRecovery();
+  }
+
+  async function enableCloudRecovery() {
+    const button = $('cloudRecoveryEnable');
+    if (button) { button.disabled = true; button.textContent = 'Protecting key...'; }
+    try {
+      const response = await fetch(`${API_BASE}/api/security/cloud-recovery`, { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not enable recovery');
+      cloudRecoveryState = result;
+      closeCloudRecovery();
+      await loadCloudRecovery();
+    } catch (error) {
+      addError(`Recovery: ${error.message}`);
+    } finally {
+      if (button) { button.disabled = false; button.textContent = 'Enable recovery'; }
+    }
+  }
+
+  async function toggleCloudRecovery() {
+    if (!cloudRecoveryState?.available) return;
+    if (!cloudRecoveryState.enrolled) return openCloudRecovery();
+    if (!window.confirm('Disable Google account recovery for this MailMate key?')) return;
+    await fetch(`${API_BASE}/api/security/cloud-recovery`, { method: 'DELETE' });
+    await loadCloudRecovery();
   }
 
   async function logout() {

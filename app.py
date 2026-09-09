@@ -48,6 +48,7 @@ from services.kyle_agent_planner import plan_kyle_turn
 from services.mail_sync_service import MailSyncService
 from services.elevenlabs_service import ElevenLabsError, signed_agent_url, status as elevenlabs_status, synthesize as elevenlabs_synthesize
 from services.secure_storage import DataEncryptionError, read_encrypted_json, write_encrypted_json
+from services.cloud_key_recovery import cloud_key_recovery
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'default-dev-secret-key-123')
@@ -1446,6 +1447,23 @@ def cache_status():
             "reprocess_seconds": CACHE_REPROCESS_SECONDS,
         }
     })
+
+
+@app.route('/api/security/cloud-recovery', methods=['GET', 'POST', 'DELETE'])
+def cloud_recovery_settings():
+    profile = get_user_profile()
+    if not profile:
+        return jsonify({'error': 'Not authenticated'}), 401
+    identity = profile.get('id') or profile.get('sub') or profile.get('email')
+    try:
+        if request.method == 'POST':
+            return jsonify({'ok': True, **cloud_key_recovery.enroll(identity)})
+        if request.method == 'DELETE':
+            return jsonify({'ok': True, **cloud_key_recovery.disable(identity)})
+        return jsonify(cloud_key_recovery.status(identity))
+    except Exception as exc:
+        app.logger.warning('Cloud key recovery request failed: %s', type(exc).__name__)
+        return jsonify({'error': str(exc)}), 503
 
 
 @app.route('/api/gmail/messages/<message_id>', methods=['DELETE'])

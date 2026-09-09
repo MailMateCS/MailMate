@@ -94,6 +94,11 @@ def encryption_ready():
         return False
 
 
+def data_key_for_wrapping():
+    """Return key material only to the server-side recovery provider."""
+    return _master_key()
+
+
 def opaque_key(purpose, identity):
     message = f'{purpose}\0{identity}'.encode('utf-8')
     return hmac.new(_master_key(), message, hashlib.sha256).hexdigest()
