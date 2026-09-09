@@ -37,6 +37,13 @@ _overview_cache: Dict[str, Any] = {}
 _overview_inflight: Dict[str, threading.Event] = {}
 
 
+def _gemini_models() -> List[str]:
+    primary = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+    configured = os.getenv("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest")
+    models = [primary, *(item.strip() for item in configured.split(","))]
+    return list(dict.fromkeys(model for model in models if model))
+
+
 def _gemini_completion(
     prompt: str,
     json_mode: bool = False,
@@ -61,8 +68,6 @@ def _gemini_completion(
         [{"role": "user", "content": prompt}], max_input_tokens
     )[0]["content"]
 
-    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "contents": [{"parts": [{"text": bounded_prompt}]}],
         "generationConfig": {
@@ -72,19 +77,55 @@ def _gemini_completion(
         },
     }
 
-    # One retry: wait 5 s on first 429, then give up and arm circuit breaker.
+    read_timeout = max(5, min(int(os.getenv("GEMINI_READ_TIMEOUT", "30")), 60))
+    retry_count = max(0, min(int(os.getenv("GEMINI_TRANSIENT_RETRIES", "1")), 2))
+    last_error: Exception | None = None
     response = None
-    for attempt in range(2):
-        response = requests.post(url, params={"key": key}, json=payload, timeout=18)
-        if response.status_code == 429:
-            with _quota_lock:
-                _quota_blocked_until = _time.monotonic() + _QUOTA_BACKOFF_SECS
-            if attempt == 0:
-                _time.sleep(5)
+
+    for model_index, model in enumerate(_gemini_models()):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        attempts = retry_count + 1 if model_index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    url,
+                    params={"key": key},
+                    json=payload,
+                    timeout=(5, read_timeout),
+                )
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                response = None
+                if attempt + 1 < attempts:
+                    _time.sleep(0.4)
+                    continue
+                break
+
+            if response.status_code == 429:
+                with _quota_lock:
+                    _quota_blocked_until = _time.monotonic() + _QUOTA_BACKOFF_SECS
+                raise RuntimeError("Gemini quota exceeded (429) — retry automatically in 60 s")
+
+            if response.status_code == 404 and model_index + 1 < len(_gemini_models()):
+                last_error = RuntimeError(f"Gemini model {model} is unavailable")
+                response = None
+                break
+
+            if response.status_code >= 500 and attempt + 1 < attempts:
+                last_error = RuntimeError(f"Gemini server error ({response.status_code})")
+                response = None
+                _time.sleep(0.4)
                 continue
-            raise RuntimeError("Gemini quota exceeded (429) — will retry automatically in 60 s")
-        response.raise_for_status()
-        break
+
+            response.raise_for_status()
+            break
+
+        if response is not None:
+            break
+
+    if response is None:
+        message = "Gemini did not respond after a bounded retry"
+        raise RuntimeError(message) from last_error
 
     data = response.json()
     candidates = data.get("candidates") or []

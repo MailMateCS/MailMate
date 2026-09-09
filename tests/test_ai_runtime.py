@@ -11,6 +11,68 @@ from services.agent.token_budget import approximate_tokens, bound_messages
 from services import ai_service
 
 
+class _GeminiResponse:
+    def __init__(self, status_code=200, text='OK'):
+        self.status_code = status_code
+        self.text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f'HTTP {self.status_code}')
+
+    def json(self):
+        return {'candidates': [{'content': {'parts': [{'text': self.text}]}}]}
+
+
+def test_gemini_retries_one_transient_timeout(monkeypatch):
+    calls = []
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    monkeypatch.setenv('GEMINI_MODEL', 'gemini-3.5-flash-lite')
+    monkeypatch.setattr(ai_service._time, 'sleep', lambda *_: None)
+
+    def post(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise ai_service.requests.ReadTimeout('slow response')
+        return _GeminiResponse(text='Recovered')
+
+    monkeypatch.setattr(ai_service.requests, 'post', post)
+    assert ai_service._gemini_completion('hello') == 'Recovered'
+    assert len(calls) == 2
+    assert calls[0]['timeout'] == (5, 30)
+
+
+def test_gemini_uses_stable_alias_when_configured_model_is_missing(monkeypatch):
+    urls = []
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    monkeypatch.setenv('GEMINI_MODEL', 'retired-model')
+    monkeypatch.setenv('GEMINI_FALLBACK_MODELS', 'gemini-flash-lite-latest')
+
+    def post(url, **kwargs):
+        urls.append(url)
+        return _GeminiResponse(404) if 'retired-model' in url else _GeminiResponse(text='Fallback')
+
+    monkeypatch.setattr(ai_service.requests, 'post', post)
+    assert ai_service._gemini_completion('hello') == 'Fallback'
+    assert len(urls) == 2
+
+
+def test_gemini_quota_failure_does_not_spend_a_retry(monkeypatch):
+    calls = []
+    monkeypatch.setenv('GEMINI_API_KEY', 'test-key')
+    monkeypatch.setattr(ai_service, '_quota_blocked_until', 0.0)
+    monkeypatch.setattr(
+        ai_service.requests,
+        'post',
+        lambda *args, **kwargs: calls.append(1) or _GeminiResponse(429),
+    )
+
+    with pytest.raises(RuntimeError, match='quota exceeded'):
+        ai_service._gemini_completion('hello')
+    assert calls == [1]
+    monkeypatch.setattr(ai_service, '_quota_blocked_until', 0.0)
+
+
 def test_prompt_budget_truncates_before_generation():
     messages = [
         {'role': 'system', 'content': 'rules ' * 1000},
