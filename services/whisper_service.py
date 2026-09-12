@@ -103,10 +103,16 @@ class WhisperService:
         }
 
     def transcribe(self, audio_path):
-        if not self.is_ready and self.is_downloading:
-            self.ready_event.wait(timeout=20)
+        # Do not block an interactive voice request while the model is still
+        # downloading/warming. The browser client has a speech-recognition
+        # fallback and should switch to it immediately instead of appearing
+        # frozen for up to 20 seconds.
         if not self.is_ready:
-            raise Exception("whisper_model_loading")
+            if self.is_downloading:
+                raise Exception("whisper_model_loading")
+            if self.error:
+                raise Exception(f"whisper_model_unavailable: {self.error}")
+            raise Exception("whisper_model_unavailable")
 
         # We use Vad filtering
         segments, info = self.model.transcribe(

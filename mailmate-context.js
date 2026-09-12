@@ -118,4 +118,58 @@
   });
 
   window.MailmateContext = { state, setPage, select, open, clear, remember, snapshot };
+
+  // Kyle's original voice bootstrap considered `downloading` to mean Whisper was
+  // ready, which could make the first mic request block against a model that was
+  // still loading. Normalize that status before kyle.js is evaluated so the
+  // browser speech-recognition fallback is used until Whisper is actually ready.
+  if (!window.__mailmateVoiceFetchGuardV1 && typeof window.fetch === 'function') {
+    window.__mailmateVoiceFetchGuardV1 = true;
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = async function mailmateFetch(input, init) {
+      const url = typeof input === 'string' ? input : String(input?.url || '');
+      const response = await nativeFetch(input, init);
+      if (!/\/api\/stt\/status(?:\?|$)/.test(url) || !response.ok) return response;
+
+      try {
+        const status = await response.clone().json();
+        if (status?.downloading && !status?.loaded && !status?.available) {
+          const headers = new Headers(response.headers);
+          headers.set('content-type', 'application/json');
+          return new Response(JSON.stringify({
+            ...status,
+            downloading: false,
+            available: false,
+            loaded: false,
+            fallback: 'browser-speech-recognition'
+          }), {
+            status: response.status,
+            statusText: response.statusText,
+            headers
+          });
+        }
+      } catch (_) {}
+      return response;
+    };
+  }
+
+  // Fork-only stabilization layer. Keep the experimental fixes isolated until
+  // they are verified and folded back into the core dashboard modules.
+  if (!document.querySelector('script[data-mailmate-fork-fixes]')) {
+    const patch = document.createElement('script');
+    patch.src = './mailmate-fork-fixes.js?v=1';
+    patch.async = false;
+    patch.dataset.mailmateForkFixes = 'true';
+    patch.onerror = () => console.warn('[MailMate] fork fixes failed to load');
+    document.head.appendChild(patch);
+  }
+
+  if (!document.querySelector('script[data-mailmate-email-fixes]')) {
+    const emailPatch = document.createElement('script');
+    emailPatch.src = './mailmate-email-fixes.js?v=1';
+    emailPatch.async = false;
+    emailPatch.dataset.mailmateEmailFixes = 'true';
+    emailPatch.onerror = () => console.warn('[MailMate] email safety/theme fixes failed to load');
+    document.head.appendChild(emailPatch);
+  }
 })();
