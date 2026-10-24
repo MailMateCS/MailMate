@@ -65,7 +65,7 @@ packaging==26.3
 paramiko==5.0.0
 pdfminer.six==20260107
 pdfplumber==0.11.10
-pillow==12.3.0
+pillow==13.0.0
 pluggy==1.6.0
 propcache==0.5.2
 proto-plus==1.28.2
