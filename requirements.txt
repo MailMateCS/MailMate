@@ -70,7 +70,7 @@ pluggy==1.6.0
 propcache==0.5.2
 proto-plus==1.28.2
 protobuf==5.29.6
-pyasn1==0.6.4
+pyasn1==0.6.5
 pyasn1_modules==0.4.2
 PyAudio==0.2.14
 pycparser==3.0
